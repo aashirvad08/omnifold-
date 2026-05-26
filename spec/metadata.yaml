@@ -32,12 +32,18 @@ observables:
   - name: "pT_ll"
     description: "Transverse momentum of dilepton system"
     units: "GeV"
+    suggested_bins: [200, 250, 300, 350, 400, 500, 600, 800, 1200]
+    bins_note: "Preview bins based on data range. Not official publication bins."
   - name: "pT_l1"
     description: "Leading lepton transverse momentum"
     units: "GeV"
+    suggested_bins: [100, 150, 200, 250, 300, 400, 600, 900]
+    bins_note: "Preview bins based on data range. Not official publication bins."
   - name: "pT_l2"
     description: "Subleading lepton transverse momentum"
     units: "GeV"
+    suggested_bins: [25, 50, 75, 100, 150, 200, 300]
+    bins_note: "Preview bins based on data range. Not official publication bins."
   - name: "eta_l1"
     description: "Leading lepton pseudorapidity"
     units: "1"
@@ -158,6 +164,13 @@ event_selection:
     Based on observable content (pT_ll, track-jet kinematics, lepton pT/eta),
     the selection appears consistent with a Z+jets fiducial region requiring
     two leptons and at least one track-jet. Exact cut values are not stored.
+  phase_space:
+    lepton_pt_min: "unknown"
+    lepton_eta_max: "unknown"
+    mll_min: "unknown"
+    mll_max: "unknown"
+    min_track_jets: 1
+    note: "Exact cut values not stored in files. To be confirmed by mentors."
 
 training:
   algorithm: "OmniFold"
