@@ -1,6 +1,7 @@
 # Gap Analysis of OmniFold Weight Files
 
 This gap analysis answers three core evaluation questions:
+
 1. What is contained in each file?
 2. How are columns structured and how do files differ?
 3. What missing metadata blocks reproducible reuse?
@@ -61,11 +62,11 @@ The three files differ substantially in weight information:
 
 - **Concrete column summary**
 
-| File | Events | Observable Columns | Weight Columns | Metadata Columns |
-|---|---:|---:|---:|---|
-| `multifold.h5` | 418,014 | 24 | ~175 | `target_dd` |
-| `multifold_sherpa.h5` | 326,430 | 24 | ~27 | none |
-| `multifold_nonDY.h5` | 433,397 | 24 | 2 | none |
+| File                  |  Events | Observable Columns | Weight Columns | Metadata Columns |
+| --------------------- | ------: | -----------------: | -------------: | ---------------- |
+| `multifold.h5`        | 418,014 |                 24 |           ~175 | `target_dd`      |
+| `multifold_sherpa.h5` | 326,430 |                 24 |            ~27 | none             |
+| `multifold_nonDY.h5`  | 433,397 |                 24 |              2 | none             |
 
 Observable columns are identical across all files. The weight column counts
 differ significantly, with only `multifold.h5` providing full uncertainty
@@ -109,3 +110,31 @@ These factors make a common metadata layer essential for interoperability.
 ## 6. Summary
 
 The files are useful but not self-describing enough for robust reuse across analyses. A structured metadata schema is needed to define observables, weight families, normalization, training context, and uncertainty semantics so OmniFold outputs remain reproducible and comparable.
+
+## Summary Table
+
+| File                | Events  | Weight Columns | Key Finding                       |
+| ------------------- | ------- | -------------- | --------------------------------- |
+| multifold.h5        | 418,014 | 175            | Full replica families present     |
+| multifold_sherpa.h5 | 326,430 | 27             | Reduced subset only               |
+| multifold_nonDY.h5  | 433,397 | 2              | Nominal only, no uncertainty info |
+
+**Key conclusion:** Weight structure is asymmetric across files. Fixed column
+prefix assumptions cannot work. A metadata-driven taxonomy is required.
+
+## 7. Open Questions
+
+1. Should iteration count be a fixed default (e.g. 4) or always
+   analysis-specific metadata?
+
+2. Should replica/bootstrap weights be supported inside systematic
+   samples, or only in the nominal file?
+
+3. What is `target_dd` — training target, classifier score, or
+   analysis-specific auxiliary field?
+
+4. Should the schema require explicit `event_id`, or is row-order
+   alignment sufficient?
+
+5. Should the schema anticipate additional files beyond the three
+   provided (e.g. per-iteration weights, model checkpoints)?
