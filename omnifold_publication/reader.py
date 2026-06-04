@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from .exceptions import PackageReadError, UnsupportedFormatVersion
+
 
 SUPPORTED_FORMAT_VERSIONS = {"0.1", "0.2"}
 DEFAULT_HDF_KEY = "df"
@@ -24,7 +26,7 @@ def _column_from_spec(spec: Any) -> str:
         return spec
     if isinstance(spec, dict) and isinstance(spec.get("column"), str):
         return spec["column"]
-    raise KeyError(f"Weight specification does not define a column: {spec!r}")
+    raise PackageReadError(f"Weight specification does not define a column: {spec!r}")
 
 
 def ensure_supported_format_version(metadata: dict[str, Any]) -> None:
@@ -33,7 +35,7 @@ def ensure_supported_format_version(metadata: dict[str, Any]) -> None:
     version = metadata.get("format_version")
     if version not in SUPPORTED_FORMAT_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_FORMAT_VERSIONS))
-        raise ValueError(
+        raise UnsupportedFormatVersion(
             f"Unsupported format_version {version!r}; supported versions: {supported}."
         )
 
@@ -45,7 +47,7 @@ def load_metadata(path: str | Path, enforce_version: bool = False) -> dict[str, 
     with metadata_path.open("r", encoding="utf-8") as stream:
         metadata = yaml.safe_load(stream) or {}
     if not isinstance(metadata, dict):
-        raise ValueError("Package metadata must be a mapping.")
+        raise PackageReadError("Package metadata must be a mapping.")
     if enforce_version:
         ensure_supported_format_version(metadata)
     return metadata
@@ -70,7 +72,13 @@ def load_events(path: str | Path, columns: list[str] | None = None) -> pd.DataFr
             events_path = _resolve_data_path(path, nominal_file["path"])
             return pd.read_hdf(events_path, key=DEFAULT_HDF_KEY, columns=columns)
 
-        events_file = metadata["publication"]["events_file"]
+        publication = metadata.get("publication")
+        if not isinstance(publication, dict) or "events_file" not in publication:
+            raise PackageReadError(
+                "Metadata must define either files.nominal.path or "
+                "publication.events_file."
+            )
+        events_file = publication["events_file"]
         events_path = path / events_file
         return pd.read_parquet(events_path, columns=columns)
     else:
@@ -112,27 +120,31 @@ def resolve_weight_column(
 
     weights = metadata.get("weights", {})
     if not isinstance(weights, dict):
-        raise KeyError("Metadata key 'weights' must be a mapping.")
+        raise PackageReadError("Metadata key 'weights' must be a mapping.")
 
     if iteration is not None or step is not None:
         if iteration is None or step is None:
-            raise KeyError("Both iteration and step are required for iteration weights.")
+            raise PackageReadError(
+                "Both iteration and step are required for iteration weights."
+            )
         if step not in {"step1", "step2"}:
-            raise KeyError("Iteration step must be 'step1' or 'step2'.")
+            raise PackageReadError("Iteration step must be 'step1' or 'step2'.")
         for entry in weights.get("iterations", []):
             if entry.get("iteration") == iteration and step in entry:
                 return _column_from_spec(entry[step])
-        raise KeyError(
+        raise PackageReadError(
             f"No weight column declared for iteration={iteration}, step={step!r}."
         )
 
     if variation == "nominal":
+        if "nominal" not in weights:
+            raise PackageReadError("Metadata does not declare a nominal weight.")
         return _column_from_spec(weights["nominal"])
 
     if variation in weights and isinstance(weights[variation], str):
         return weights[variation]
 
-    raise KeyError(f"Unknown metadata-declared weight variation: {variation}")
+    raise PackageReadError(f"Unknown metadata-declared weight variation: {variation}")
 
 
 def get_weights(
@@ -151,7 +163,9 @@ def get_weights(
         step=step,
     )
     if column not in df.columns:
-        raise KeyError(f"Weight column {column!r} is not present in the event table.")
+        raise PackageReadError(
+            f"Weight column {column!r} is not present in the event table."
+        )
     return df[column].to_numpy()
 
 
@@ -179,6 +193,43 @@ class OmniFoldPackage:
 
     def list_systematics(self) -> list[str]:
         return list_systematics(self._metadata)
+
+    def list_weights(self) -> list[str]:
+        """Return all declared weight variation names."""
+
+        weights = self._metadata.get("weights", {})
+        if not isinstance(weights, dict):
+            return []
+        return [key for key in weights if key != "iterations"]
+
+    def list_observables(self) -> list[str]:
+        """Return all declared observable names."""
+
+        observables = self._metadata.get("observables", [])
+        if not isinstance(observables, list):
+            return []
+        return [
+            observable["name"]
+            for observable in observables
+            if isinstance(observable, dict) and "name" in observable
+        ]
+
+    def summary(self) -> dict[str, Any]:
+        """Return a concise summary of the package contents."""
+
+        publication = self._metadata.get("publication", {})
+        return {
+            "format_version": self._metadata.get("format_version"),
+            "event_count": publication.get("event_count")
+            if isinstance(publication, dict)
+            else None,
+            "observables": self.list_observables(),
+            "weights": self.list_weights(),
+            "systematics": self.list_systematics(),
+            "checksum_sha256": publication.get("checksum_sha256", "not recorded")
+            if isinstance(publication, dict)
+            else "not recorded",
+        }
 
     def get_weights(
         self,
