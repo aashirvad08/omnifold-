@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from .exceptions import PackageReadError, PackageValidationError
 from .reader import (
     SUPPORTED_FORMAT_VERSIONS,
     list_systematics,
     load_metadata,
     resolve_weight_column,
 )
+from .schema import validate_metadata
 
 
-REQUIRED_METADATA_KEYS = ("format_version", "observables", "weights", "publication")
 REQUIRED_PUBLICATION_KEYS = ("format", "events_file", "event_count", "columns")
-REQUIRED_WEIGHT_KEYS = ("nominal", "base_mc_weight")
 
 
 def _weight_columns(metadata: dict[str, Any]) -> list[str]:
@@ -26,14 +27,14 @@ def _weight_columns(metadata: dict[str, Any]) -> list[str]:
     for variation in ["nominal", *list_systematics(metadata)]:
         try:
             columns.append(resolve_weight_column(metadata, variation=variation))
-        except KeyError:
+        except (KeyError, PackageReadError):
             continue
 
     weights = metadata.get("weights", {})
     if isinstance(weights, dict):
         try:
             columns.append(resolve_weight_column(metadata, variation="base_mc_weight"))
-        except KeyError:
+        except (KeyError, PackageReadError):
             base = weights.get("base_mc_weight")
             if isinstance(base, str):
                 columns.append(base)
@@ -147,7 +148,7 @@ def validate_normalization(
     if not isinstance(column, str):
         try:
             column = resolve_weight_column(metadata, variation="nominal")
-        except KeyError:
+        except (KeyError, PackageReadError):
             return ["normalization.nominal_weight_column is missing."]
 
     if column not in df.columns:
@@ -172,6 +173,27 @@ def validate_normalization(
     return errors
 
 
+def _verify_checksum(events_path: Path, metadata: dict[str, Any]) -> list[str]:
+    """Verify SHA-256 checksum of events.parquet if recorded in metadata."""
+
+    expected = metadata.get("publication", {}).get("checksum_sha256")
+    if expected is None:
+        return []
+
+    sha256 = hashlib.sha256()
+    with events_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8192), b""):
+            sha256.update(chunk)
+
+    actual = sha256.hexdigest()
+    if actual != expected:
+        return [
+            "Checksum mismatch for events.parquet: "
+            f"expected {expected}, got {actual}"
+        ]
+    return []
+
+
 def validate_package(path: str | Path) -> list[str]:
     """Return a list of validation errors for the package at ``path``."""
 
@@ -187,19 +209,18 @@ def validate_package(path: str | Path) -> list[str]:
         return errors
 
     metadata = load_metadata(metadata_path)
-    for key in REQUIRED_METADATA_KEYS:
-        if key not in metadata:
-            errors.append(f"Missing metadata key: {key}")
+
+    try:
+        validate_metadata(metadata)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return errors
 
     publication = metadata.get("publication", {})
-    weights = metadata.get("weights", {})
 
     for key in REQUIRED_PUBLICATION_KEYS:
         if key not in publication:
             errors.append(f"Missing publication key: {key}")
-    for key in REQUIRED_WEIGHT_KEYS:
-        if key not in weights:
-            errors.append(f"Missing weights key: {key}")
 
     if errors:
         return errors
@@ -212,6 +233,11 @@ def validate_package(path: str | Path) -> list[str]:
     events_path = package_dir / publication["events_file"]
     if not events_path.exists():
         errors.append(f"Missing events file: {events_path}")
+
+    if errors:
+        return errors
+
+    errors.extend(_verify_checksum(events_path, metadata))
 
     if errors:
         return errors
@@ -241,11 +267,11 @@ def validate_package(path: str | Path) -> list[str]:
 
 
 def ensure_valid_package(path: str | Path) -> None:
-    """Raise ``ValueError`` if the package is invalid."""
+    """Raise ``PackageValidationError`` if the package is invalid."""
 
     errors = validate_package(path)
     if errors:
-        raise ValueError("\n".join(errors))
+        raise PackageValidationError("\n".join(errors))
 
 
 def closure_test(
@@ -262,7 +288,9 @@ def closure_test(
     weights = package.get_weights(variation=variation)
     df = package.load_events(columns=[observable])
     if observable not in df.columns:
-        raise KeyError(f"Observable {observable!r} is not present in the event table.")
+        raise PackageValidationError(
+            f"Observable {observable!r} is not present in the event table."
+        )
 
     hist, edges = np.histogram(
         df[observable].to_numpy(dtype=float),

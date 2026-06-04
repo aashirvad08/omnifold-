@@ -1,5 +1,12 @@
 """OmniFold publication package helpers."""
 
+from .exceptions import (
+    OmniFoldPublicationError,
+    PackageReadError,
+    PackageValidationError,
+    PackageWriteError,
+    UnsupportedFormatVersion,
+)
 from .reader import (
     OmniFoldPackage,
     get_uncertainty,
@@ -19,6 +26,11 @@ from .writer import write_package
 
 __all__ = [
     "OmniFoldPackage",
+    "OmniFoldPublicationError",
+    "PackageReadError",
+    "PackageValidationError",
+    "PackageWriteError",
+    "UnsupportedFormatVersion",
     "closure_test",
     "ensure_valid_package",
     "get_uncertainty",

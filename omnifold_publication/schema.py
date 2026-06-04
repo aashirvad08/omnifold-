@@ -49,9 +49,14 @@ class Systematics(BaseModel):
 
 
 class Normalization(BaseModel):
-    luminosity: str | float = Field(...)
-    cross_section: str | float = Field(...)
-    event_weights_normalized: bool = Field(...)
+    luminosity: str | float | None = Field(default=None)
+    cross_section: str | float | None = Field(default=None)
+    event_weights_normalized: bool | None = Field(default=None)
+    mode: str | None = Field(default=None)
+    base_weight_column: str | None = Field(default=None)
+    nominal_weight_column: str | None = Field(default=None)
+    expected_nominal_sumw: float | None = Field(default=None)
+    tolerance: float | None = Field(default=None)
     note: str | None = Field(default=None)
 
 
@@ -98,6 +103,21 @@ class Files(BaseModel):
     systematics: list[FileEntry] = Field(default_factory=list)
 
 
+class EventAlignment(BaseModel):
+    method: str = Field(default="row_order")
+    column: str | None = Field(default=None)
+
+
+class Publication(BaseModel):
+    format: str = Field(...)
+    events_file: str = Field(...)
+    event_count: int = Field(...)
+    columns: list[str] = Field(default_factory=list)
+    source_file: str | None = Field(default=None)
+    event_alignment: EventAlignment | None = Field(default=None)
+    checksum_sha256: str | None = Field(default=None)
+
+
 class Metadata(BaseModel):
     format_version: str = Field(...)
     dataset: Dataset | None = Field(default=None)
@@ -110,6 +130,7 @@ class Metadata(BaseModel):
     normalization: Normalization = Field(...)
     event_selection: EventSelection | None = Field(default=None)
     training: Training | None = Field(default=None)
+    publication: Publication | None = Field(default=None)
     usage_notes: list[str] = Field(default_factory=list)
 
 
