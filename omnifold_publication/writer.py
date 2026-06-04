@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
 
 import pandas as pd
 import yaml
+
+from .exceptions import PackageWriteError
 
 
 DEFAULT_INPUT_PATH = Path("data/multifold.h5")
@@ -23,11 +26,21 @@ REPLICA_PREFIXES = ("weights_ensemble_", "weights_bootstrap_mc_")
 FORMAT_VERSION = "0.2"
 
 
+def _compute_checksum(path: Path) -> str:
+    """Compute SHA-256 checksum of a file."""
+
+    sha256 = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
 def _load_source_metadata(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
         data = yaml.safe_load(stream) or {}
     if not isinstance(data, dict):
-        raise ValueError("Source metadata must be a mapping.")
+        raise PackageWriteError("Source metadata must be a mapping.")
     return data
 
 
@@ -101,6 +114,7 @@ def _filter_observables(
 
 def _build_package_metadata(
     source_metadata: dict[str, Any],
+    observable_names: list[str],
     selected_columns: list[str],
     replica_column: str | None,
     iteration_weights: list[dict[str, Any]],
@@ -109,7 +123,6 @@ def _build_package_metadata(
     input_path: Path,
     has_event_id: bool,
 ) -> dict[str, Any]:
-    observable_names = [PRIMARY_OBSERVABLE, EXTRA_OBSERVABLE]
     weights: dict[str, Any] = {
         "nominal": NOMINAL_WEIGHT_COLUMN,
         "base_mc_weight": BASE_WEIGHT_COLUMN,
@@ -152,10 +165,17 @@ def write_package(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     metadata_source: str | Path = DEFAULT_METADATA_SOURCE,
     event_count: int = DEFAULT_EVENT_COUNT,
+    observables: list[str] | None = None,
 ) -> Path:
     """Create a minimal Parquet-backed publication package."""
 
     input_path = Path(input_path)
+    if not input_path.exists():
+        raise PackageWriteError(
+            f"Input file not found: {input_path}. "
+            f"Make sure data/multifold.h5 is present locally."
+        )
+
     output_dir = Path(output_dir)
     metadata_source = Path(metadata_source)
 
@@ -164,9 +184,9 @@ def write_package(
     replica_column = _find_replica_column(source_columns)
     iteration_weights = _discover_iteration_weights(source_columns)
 
+    observable_names = observables or [PRIMARY_OBSERVABLE, EXTRA_OBSERVABLE]
     selected_columns = [
-        PRIMARY_OBSERVABLE,
-        EXTRA_OBSERVABLE,
+        *observable_names,
         BASE_WEIGHT_COLUMN,
         NOMINAL_WEIGHT_COLUMN,
     ]
@@ -184,10 +204,11 @@ def write_package(
 
     package_df = df.loc[:, selected_columns]
     package_event_count = int(len(package_df))
-    nominal_sumw = float(package_df[NOMINAL_WEIGHT_COLUMN].sum())
+    nominal_sumw = float(package_df[NOMINAL_WEIGHT_COLUMN].to_numpy(dtype=float).sum())
     source_metadata = _load_source_metadata(metadata_source)
     package_metadata = _build_package_metadata(
         source_metadata=source_metadata,
+        observable_names=observable_names,
         selected_columns=selected_columns,
         replica_column=replica_column,
         iteration_weights=iteration_weights,
@@ -198,7 +219,9 @@ def write_package(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    package_df.to_parquet(output_dir / "events.parquet", index=False)
+    events_path = output_dir / "events.parquet"
+    package_df.to_parquet(events_path, index=False)
+    package_metadata["publication"]["checksum_sha256"] = _compute_checksum(events_path)
     with (output_dir / "metadata.yaml").open("w", encoding="utf-8") as stream:
         yaml.safe_dump(package_metadata, stream, sort_keys=False)
 
