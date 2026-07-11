@@ -23,6 +23,11 @@ EVENT_ID_COLUMN = "event_id"
 BASE_WEIGHT_COLUMN = "weight_mc"
 NOMINAL_WEIGHT_COLUMN = "weights_nominal"
 REPLICA_PREFIXES = ("weights_ensemble_", "weights_bootstrap_mc_")
+ALL_REPLICA_PREFIXES = (
+    "weights_ensemble_",
+    "weights_bootstrap_mc_",
+    "weights_bootstrap_data_",
+)
 FORMAT_VERSION = "0.2"
 
 
@@ -50,6 +55,14 @@ def _find_replica_column(columns: list[str]) -> str | None:
             if column.startswith(prefix):
                 return column
     return None
+
+
+def _find_replica_columns(columns: list[str]) -> list[str]:
+    return [
+        column
+        for column in columns
+        if any(column.startswith(prefix) for prefix in ALL_REPLICA_PREFIXES)
+    ]
 
 
 def _discover_iteration_weights(columns: list[str]) -> list[dict[str, Any]]:
@@ -122,6 +135,7 @@ def _build_package_metadata(
     nominal_sumw: float,
     input_path: Path,
     has_event_id: bool,
+    replica_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     weights: dict[str, Any] = {
         "nominal": NOMINAL_WEIGHT_COLUMN,
@@ -129,6 +143,8 @@ def _build_package_metadata(
     }
     if replica_column is not None:
         weights["replica"] = replica_column
+    for column in replica_columns or []:
+        weights[column] = column
     if iteration_weights:
         weights["iterations"] = iteration_weights
 
@@ -166,6 +182,7 @@ def write_package(
     metadata_source: str | Path = DEFAULT_METADATA_SOURCE,
     event_count: int = DEFAULT_EVENT_COUNT,
     observables: list[str] | None = None,
+    include_all_replicas: bool = False,
 ) -> Path:
     """Create a minimal Parquet-backed publication package."""
 
@@ -182,6 +199,7 @@ def write_package(
     df = pd.read_hdf(input_path, "df").iloc[:event_count].copy()
     source_columns = list(df.columns)
     replica_column = _find_replica_column(source_columns)
+    replica_columns = _find_replica_columns(source_columns) if include_all_replicas else []
     iteration_weights = _discover_iteration_weights(source_columns)
 
     observable_names = observables or [PRIMARY_OBSERVABLE, EXTRA_OBSERVABLE]
@@ -194,6 +212,7 @@ def write_package(
         selected_columns.append(EVENT_ID_COLUMN)
     if replica_column is not None:
         selected_columns.append(replica_column)
+    selected_columns.extend(replica_columns)
     for iteration in iteration_weights:
         for step in ("step1", "step2"):
             step_spec = iteration.get(step)
@@ -216,6 +235,7 @@ def write_package(
         nominal_sumw=nominal_sumw,
         input_path=input_path,
         has_event_id=EVENT_ID_COLUMN in package_df.columns,
+        replica_columns=replica_columns,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
