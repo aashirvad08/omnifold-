@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 
 from .exceptions import PackageReadError, UnsupportedFormatVersion
+from .histogram import HistogramResult, compute_weighted_histogram
 
 
 SUPPORTED_FORMAT_VERSIONS = {"0.1", "0.2"}
@@ -189,9 +190,13 @@ class OmniFoldPackage:
         self._metadata = load_metadata(self.package_dir, enforce_version=True)
 
     def load_events(self, columns: list[str] | None = None) -> pd.DataFrame:
+        """Load event columns from this package."""
+
         return load_events(self.package_dir, columns=columns)
 
     def list_systematics(self) -> list[str]:
+        """Return systematic names declared by this package."""
+
         return list_systematics(self._metadata)
 
     def list_weights(self) -> list[str]:
@@ -213,6 +218,30 @@ class OmniFoldPackage:
             for observable in observables
             if isinstance(observable, dict) and "name" in observable
         ]
+
+    def observable_units(self, name: str) -> str:
+        """Return the declared units for an observable, or an empty string."""
+
+        for observable in self._metadata.get("observables", []):
+            if isinstance(observable, dict) and observable.get("name") == name:
+                units = observable.get("units", "")
+                return units if isinstance(units, str) else ""
+        raise PackageReadError(f"Unknown observable: {name}")
+
+    def observable_bins(self, name: str) -> list[float] | None:
+        """Return declared or suggested bin edges for an observable."""
+
+        for observable in self._metadata.get("observables", []):
+            if isinstance(observable, dict) and observable.get("name") == name:
+                bins = observable.get("bins", observable.get("suggested_bins"))
+                if bins is None:
+                    return None
+                if not isinstance(bins, list):
+                    raise PackageReadError(
+                        f"Bins for observable {name!r} must be a list."
+                    )
+                return [float(edge) for edge in bins]
+        raise PackageReadError(f"Unknown observable: {name}")
 
     def summary(self) -> dict[str, Any]:
         """Return a concise summary of the package contents."""
@@ -237,8 +266,50 @@ class OmniFoldPackage:
         variation: str | None = None,
         iteration: int | None = None,
         step: str | None = None,
-    ):
+    ) -> np.ndarray:
+        """Return a declared weight array or the derived final event weights."""
+
         selection = variation or kind
+        if selection == "final" and iteration is None and step is None:
+            weights = self._metadata.get("weights", {})
+            if not isinstance(weights, dict):
+                raise PackageReadError("Metadata key 'weights' must be a mapping.")
+
+            missing = [
+                key for key in ("base_mc_weight", "nominal") if key not in weights
+            ]
+            if missing:
+                missing_names = ", ".join(missing)
+                raise PackageReadError(
+                    "Cannot compute final weights; metadata is missing: "
+                    f"{missing_names}."
+                )
+
+            base_column = _column_from_spec(weights["base_mc_weight"])
+            nominal_column = _column_from_spec(weights["nominal"])
+            try:
+                df = self.load_events(columns=[base_column, nominal_column])
+            except Exception as exc:
+                raise PackageReadError(
+                    "Cannot compute final weights; required columns "
+                    f"{base_column!r} and {nominal_column!r} must be present."
+                ) from exc
+
+            missing_columns = [
+                column
+                for column in (base_column, nominal_column)
+                if column not in df.columns
+            ]
+            if missing_columns:
+                raise PackageReadError(
+                    "Cannot compute final weights; missing event columns: "
+                    f"{', '.join(missing_columns)}."
+                )
+            return (
+                df[base_column].to_numpy(dtype=float)
+                * df[nominal_column].to_numpy(dtype=float)
+            )
+
         column = resolve_weight_column(
             self._metadata,
             variation=selection,
@@ -254,7 +325,34 @@ class OmniFoldPackage:
             step=step,
         )
 
+    def histogram(
+        self,
+        observable: str,
+        variation: str = "nominal",
+        bins: list[float] | int | None = None,
+    ) -> HistogramResult:
+        """Compute a weighted histogram for one observable and variation."""
+
+        selected_bins = bins
+        if selected_bins is None:
+            selected_bins = self.observable_bins(observable) or 30
+        events = self.load_events(columns=[observable])
+        weights = self.get_weights(variation)
+        result = compute_weighted_histogram(
+            events[observable].to_numpy(dtype=float),
+            weights,
+            bins=selected_bins,
+        )
+        return HistogramResult(
+            hist=np.asarray(result["hist"], dtype=float),
+            edges=np.asarray(result["edges"], dtype=float),
+            centers=np.asarray(result["centers"], dtype=float),
+            stat_uncertainty=np.asarray(result["uncertainty"], dtype=float),
+        )
+
     def get_uncertainty(self, variation: str) -> np.ndarray:
+        """Return per-event absolute differences from nominal weights."""
+
         nominal_column = resolve_weight_column(self._metadata, variation="nominal")
         variation_column = resolve_weight_column(self._metadata, variation=variation)
         columns = list(dict.fromkeys([nominal_column, variation_column]))
@@ -262,9 +360,13 @@ class OmniFoldPackage:
         return get_uncertainty(df, self._metadata, variation=variation)
 
     def metadata(self) -> dict[str, Any]:
+        """Return this package's loaded metadata mapping."""
+
         return self._metadata
 
     def validate(self) -> None:
+        """Validate package metadata, contents, and integrity."""
+
         from .validation import ensure_valid_package
 
         ensure_valid_package(self.package_dir)
