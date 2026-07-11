@@ -19,3 +19,7 @@ class PackageValidationError(OmniFoldPublicationError):
 
 class UnsupportedFormatVersion(OmniFoldPublicationError):
     """Raised when a package uses an unsupported format_version."""
+
+
+class ManifestNotFoundError(OmniFoldPublicationError):
+    """Raised when manifest.yaml is not found."""
