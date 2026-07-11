@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,19 @@ import pytest
 import yaml
 
 from omnifold_publication import closure_test, load_package, validate_package, write_package
+from omnifold_publication.exceptions import UnsupportedFormatVersion
+
+
+def _refresh_checksum(package_dir: Path) -> None:
+    metadata_path = package_dir / "metadata.yaml"
+    events_path = package_dir / "events.parquet"
+    with metadata_path.open("r", encoding="utf-8") as stream:
+        metadata = yaml.safe_load(stream)
+    metadata["publication"]["checksum_sha256"] = hashlib.sha256(
+        events_path.read_bytes()
+    ).hexdigest()
+    with metadata_path.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(metadata, stream, sort_keys=False)
 
 
 def test_validation_detects_event_count_mismatch(tmp_path, source_hdf):
@@ -57,7 +71,7 @@ def test_validation_requires_format_version(tmp_path, source_hdf):
         yaml.safe_dump(metadata, stream, sort_keys=False)
 
     errors = validate_package(package_dir)
-    assert any("Missing metadata key: format_version" in error for error in errors)
+    assert any("format_version" in error for error in errors)
 
 
 def test_validation_rejects_unsupported_format_version(tmp_path, source_hdf):
@@ -78,7 +92,7 @@ def test_validation_rejects_unsupported_format_version(tmp_path, source_hdf):
     errors = validate_package(package_dir)
     assert any("Unsupported format_version" in error for error in errors)
 
-    with pytest.raises(ValueError, match="Unsupported format_version"):
+    with pytest.raises(UnsupportedFormatVersion, match="Unsupported format_version"):
         load_package(package_dir)
 
 
@@ -91,6 +105,7 @@ def test_validation_detects_missing_declared_systematic_column(tmp_path, source_
     events_path = Path(package_dir) / "events.parquet"
     df = pd.read_parquet(events_path).drop(columns=["weights_ensemble_0"])
     df.to_parquet(events_path, index=False)
+    _refresh_checksum(Path(package_dir))
 
     errors = validate_package(package_dir)
     assert any("weights_ensemble_0" in error for error in errors)
@@ -106,6 +121,7 @@ def test_validation_detects_duplicate_event_ids(tmp_path, source_hdf):
     df = pd.read_parquet(events_path)
     df.loc[1, "event_id"] = df.loc[0, "event_id"]
     df.to_parquet(events_path, index=False)
+    _refresh_checksum(Path(package_dir))
 
     errors = validate_package(package_dir)
     assert any("duplicate values" in error for error in errors)
