@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from omnifold_publication import closure_test, load_package
+from omnifold_publication import PackageReadError, closure_test, load_package
 from spec.weighted_histogram import compute_weighted_histogram
 
 
@@ -38,12 +38,18 @@ def main() -> None:
     print(f"Nominal histogram bins: {len(result['hist'])}")
     print(f"Closure relative difference: {closure['relative_difference']:.3e}")
 
-    systematics = pkg.list_systematics()
-    if systematics:
-        variation = systematics[0]
-        uncertainty = pkg.get_uncertainty(variation)
+    # list_systematics() returns declared systematic/family names; not all
+    # of them are single resolvable weight columns (e.g. "dd_unfolding" is
+    # a family of columns, not one column), so get_uncertainty() only
+    # works for the ones that are. Use the first one that resolves.
+    for variation in pkg.list_systematics():
+        try:
+            uncertainty = pkg.get_uncertainty(variation)
+        except PackageReadError:
+            continue
         print(f"Example systematic: {variation}")
         print(f"Mean per-event weight shift: {np.mean(uncertainty):.6g}")
+        break
 
 
 if __name__ == "__main__":
