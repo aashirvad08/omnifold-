@@ -19,8 +19,15 @@ def write_manifest(
     nominal_path: str | Path,
     variations: dict[str, dict],
     analysis_name: str = "unnamed",
+    target_path: str | Path | None = None,
 ) -> Path:
-    """Write a manifest.yaml linking multiple OmniFold packages."""
+    """Write a manifest.yaml linking multiple OmniFold packages.
+
+    ``target_path`` declares a truth/target companion sample (the known
+    distribution pseudo-data was reweighted toward, cf. target.h5 in
+    2_pseudo_results.ipynb) under the role "target"; it is not listed as a
+    variation.
+    """
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -31,6 +38,11 @@ def write_manifest(
             "role": "nominal",
         }
     }
+    if target_path is not None:
+        samples["target"] = {
+            "path": Path(target_path).as_posix(),
+            "role": "target",
+        }
     for name, variation in variations.items():
         samples[name] = {
             "path": Path(variation["path"]).as_posix(),

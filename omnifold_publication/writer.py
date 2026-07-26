@@ -10,7 +10,9 @@ from typing import Any
 import pandas as pd
 import yaml
 
+from .derived_observables import DERIVED_OBSERVABLES, compute_derived_observables
 from .exceptions import PackageWriteError
+from .selection import selection_columns
 
 
 DEFAULT_INPUT_PATH = Path("data/multifold.h5")
@@ -22,6 +24,45 @@ EXTRA_OBSERVABLE = "pT_l1"
 EVENT_ID_COLUMN = "event_id"
 BASE_WEIGHT_COLUMN = "weight_mc"
 NOMINAL_WEIGHT_COLUMN = "weights_nominal"
+# How weights_nominal relates to weight_mc. The ATLAS Z+jets release ships
+# weights_nominal with the MC weight already folded in ("includes_mc_weight");
+# "reweighting_factor" covers files that store only the learned factor.
+NOMINAL_CONVENTIONS = ("includes_mc_weight", "reweighting_factor")
+DEFAULT_NOMINAL_CONVENTION = "includes_mc_weight"
+
+# Systematic NP grouping follows multifold_util.py:335-341 (event = muEff* +
+# pileup, theory*, track*, muCal*). Luminosity and top-background get their
+# own single-column families because the release's binned code treats them
+# individually (v_lumi and the topBackground term of v_bkg in corr_matrix;
+# the closure chi2 of 2_pseudo_results cell 26 includes topBackground but
+# NOT lumi). Anything unmatched falls into "syst_other". All groups combine
+# in quadrature, so the split only affects labels and component selection,
+# never the full total.
+SYSTEMATIC_GROUP_PREFIXES = (
+    ("syst_event", ("weights_muEff", "weights_pileup")),
+    ("syst_theory", ("weights_theory",)),
+    ("syst_track", ("weights_track",)),
+    ("syst_muon", ("weights_muCal",)),
+    ("syst_lumi", ("weights_lumi",)),
+    ("syst_background", ("weights_topBackground",)),
+)
+REPLICA_FAMILY_RULES = (
+    ("bootstrap_mc", "weights_bootstrap_mc_", "bootstrap", "standard_deviation"),
+    ("bootstrap_data", "weights_bootstrap_data_", "bootstrap", "standard_deviation"),
+    ("ensemble", "weights_ensemble_", "ensemble", "median_standard_error"),
+)
+PAIRED_DD_COLUMN = "weights_dd"
+PAIRED_DD_REFERENCE = "target_dd"
+NORMALIZATION_MODES = ("absolute", "shape")
+# The ATLAS release weights are absolute cross-sections in femtobarns:
+# sum(weights_nominal) over any selection is the measured fiducial
+# cross-section of that region (1_basics.ipynb cells 10-11).
+DEFAULT_NORMALIZATION_MODE = "absolute"
+DEFAULT_WEIGHT_UNITS = "fb"
+ITERATION_PATTERNS = (
+    re.compile(r"^weights_(step[12])_(?:iter|iteration)_?(\d+)$"),
+    re.compile(r"^weights_(?:iter|iteration)_?(\d+)_(step[12])$"),
+)
 REPLICA_PREFIXES = ("weights_ensemble_", "weights_bootstrap_mc_")
 ALL_REPLICA_PREFIXES = (
     "weights_ensemble_",
@@ -66,16 +107,18 @@ def _find_replica_columns(columns: list[str]) -> list[str]:
 
 
 def _discover_iteration_weights(columns: list[str]) -> list[dict[str, Any]]:
-    """Find step1/step2 iteration weights when the source file provides them."""
+    """Find step1/step2 iteration weights when the source file provides them.
 
-    patterns = (
-        re.compile(r"^weights_(step[12])_(?:iter|iteration)_?(\d+)$"),
-        re.compile(r"^weights_(?:iter|iteration)_?(\d+)_(step[12])$"),
-    )
+    Optional feature: the ATLAS Z+jets release files publish only final
+    (nominal + variation) weights and contain no iteration columns, so this
+    discovery yields an empty list for the actual analysis data. It is kept
+    for source files that do store intermediate OmniFold iterations.
+    """
+
     by_iteration: dict[int, dict[str, dict[str, str]]] = {}
 
     for column in columns:
-        for pattern in patterns:
+        for pattern in ITERATION_PATTERNS:
             match = pattern.match(column)
             if match is None:
                 continue
@@ -95,16 +138,125 @@ def _discover_iteration_weights(columns: list[str]) -> list[dict[str, Any]]:
     ]
 
 
-def _build_systematics(replica_column: str | None) -> dict[str, dict[str, str]]:
-    if replica_column is None:
-        return {}
-    return {
-        "replica": {
+def _discover_systematic_families(columns: list[str]) -> dict[str, dict[str, Any]]:
+    """Group NP systematic weight columns into ATLAS-style families.
+
+    A systematic column is any ``weights_*`` column that is not the nominal,
+    a replica (bootstrap/ensemble), an iteration weight, or the paired
+    ``weights_dd`` column.
+    """
+
+    excluded = {NOMINAL_WEIGHT_COLUMN, BASE_WEIGHT_COLUMN, PAIRED_DD_COLUMN}
+    systematic_columns = [
+        column
+        for column in columns
+        if column.startswith("weights_")
+        and column not in excluded
+        and not any(column.startswith(prefix) for prefix in ALL_REPLICA_PREFIXES)
+        and not any(pattern.match(column) for pattern in ITERATION_PATTERNS)
+    ]
+
+    families: dict[str, dict[str, Any]] = {}
+    remaining = list(systematic_columns)
+    for family_name, prefixes in SYSTEMATIC_GROUP_PREFIXES:
+        members = sorted(
+            column
+            for column in remaining
+            if any(column.startswith(prefix) for prefix in prefixes)
+        )
+        if members:
+            families[family_name] = {
+                "type": "systematic",
+                "combination": "quadrature_difference_from_nominal",
+                "columns": members,
+            }
+            remaining = [column for column in remaining if column not in members]
+    if remaining:
+        families["syst_other"] = {
+            "type": "systematic",
+            "combination": "quadrature_difference_from_nominal",
+            "columns": sorted(remaining),
+        }
+
+    if PAIRED_DD_COLUMN in columns and PAIRED_DD_REFERENCE in columns:
+        families["dd_unfolding"] = {
+            "type": "paired",
+            "combination": "paired_relative_difference",
+            "columns": [PAIRED_DD_COLUMN],
+            "reference_column": PAIRED_DD_REFERENCE,
+        }
+    return families
+
+
+def _discover_replica_families(columns: list[str]) -> dict[str, dict[str, Any]]:
+    families: dict[str, dict[str, Any]] = {}
+    for family_name, prefix, family_type, combination in REPLICA_FAMILY_RULES:
+        members = sorted(column for column in columns if column.startswith(prefix))
+        if members:
+            families[family_name] = {
+                "type": family_type,
+                "combination": combination,
+                "columns": members,
+            }
+    return families
+
+
+def _family_columns(families: dict[str, dict[str, Any]]) -> list[str]:
+    columns: list[str] = []
+    for family in families.values():
+        columns.extend(family.get("columns", []))
+        reference = family.get("reference_column")
+        if isinstance(reference, str):
+            columns.append(reference)
+    return columns
+
+
+def _build_systematics(
+    replica_column: str | None,
+    families: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, str]]:
+    systematics: dict[str, dict[str, str]] = {}
+    if replica_column is not None:
+        systematics["replica"] = {
             "column": replica_column,
             "type": "ensemble",
             "combination": "absolute_difference_from_nominal",
         }
+    for name, family in (families or {}).items():
+        if family.get("type") in {"systematic", "paired"}:
+            systematics[name] = {
+                "family": name,
+                "type": family["type"],
+                "combination": family["combination"],
+            }
+    return systematics
+
+
+def _build_normalization(
+    nominal_sumw: float,
+    mode: str = DEFAULT_NORMALIZATION_MODE,
+    weight_units: str | None = DEFAULT_WEIGHT_UNITS,
+) -> dict[str, Any]:
+    """Normalization semantics of the packaged weights.
+
+    Under "absolute" mode the nominal weights are cross-sections: summing
+    them over any selection yields the measured fiducial cross-section of
+    that region (1_basics.ipynb cells 10-11). "shape" is kept for sources
+    whose weights carry no absolute scale.
+    """
+
+    normalization: dict[str, Any] = {
+        "mode": mode,
+        "base_weight_column": BASE_WEIGHT_COLUMN,
+        "nominal_weight_column": NOMINAL_WEIGHT_COLUMN,
+        "expected_nominal_sumw": nominal_sumw,
+        "tolerance": 1.0e-8,
     }
+    if weight_units is not None:
+        normalization["weight_units"] = weight_units
+    if mode == "absolute":
+        normalization["sum_weights_equals"] = "fiducial_cross_section"
+    return normalization
 
 
 def _filter_observables(
@@ -115,19 +267,30 @@ def _filter_observables(
     if not isinstance(observables, list):
         return [{"name": name} for name in selected_names]
 
-    filtered = [
-        observable
+    by_name = {
+        observable["name"]: observable
         for observable in observables
-        if isinstance(observable, dict) and observable.get("name") in selected_names
-    ]
-    if filtered:
-        return filtered
-    return [{"name": name} for name in selected_names]
+        if isinstance(observable, dict) and "name" in observable
+    }
+    entries: list[dict[str, Any]] = []
+    for name in selected_names:
+        entry = dict(by_name.get(name, {"name": name}))
+        # derived observables keep their registry selection/inputs even when
+        # the source metadata does not describe them
+        if name in DERIVED_OBSERVABLES:
+            registry = DERIVED_OBSERVABLES[name]
+            entry.setdefault("derived_from", list(registry["inputs"]))
+            if registry["selection"] is not None:
+                entry.setdefault("selection", registry["selection"])
+            entry.setdefault("description", registry["description"])
+            entry.setdefault("units", registry["units"])
+        entries.append(entry)
+    return entries
 
 
 def _build_package_metadata(
     source_metadata: dict[str, Any],
-    observable_names: list[str],
+    observable_entries: list[dict[str, Any]],
     selected_columns: list[str],
     replica_column: str | None,
     iteration_weights: list[dict[str, Any]],
@@ -136,31 +299,36 @@ def _build_package_metadata(
     input_path: Path,
     has_event_id: bool,
     replica_columns: list[str] | None = None,
+    nominal_convention: str = DEFAULT_NOMINAL_CONVENTION,
+    families: dict[str, dict[str, Any]] | None = None,
+    normalization_mode: str = DEFAULT_NORMALIZATION_MODE,
+    weight_units: str | None = DEFAULT_WEIGHT_UNITS,
 ) -> dict[str, Any]:
     weights: dict[str, Any] = {
         "nominal": NOMINAL_WEIGHT_COLUMN,
         "base_mc_weight": BASE_WEIGHT_COLUMN,
+        "nominal_convention": nominal_convention,
     }
     if replica_column is not None:
         weights["replica"] = replica_column
     for column in replica_columns or []:
         weights[column] = column
+    if families:
+        weights["families"] = families
     if iteration_weights:
         weights["iterations"] = iteration_weights
 
     metadata: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
         "dataset": source_metadata.get("dataset", {}),
-        "observables": _filter_observables(source_metadata, observable_names),
+        "observables": observable_entries,
         "weights": weights,
-        "systematics": _build_systematics(replica_column),
-        "normalization": {
-            "mode": "shape",
-            "base_weight_column": BASE_WEIGHT_COLUMN,
-            "nominal_weight_column": NOMINAL_WEIGHT_COLUMN,
-            "expected_nominal_sumw": nominal_sumw,
-            "tolerance": 1.0e-8,
-        },
+        "systematics": _build_systematics(replica_column, families),
+        "normalization": _build_normalization(
+            nominal_sumw,
+            mode=normalization_mode,
+            weight_units=weight_units,
+        ),
         "publication": {
             "format": "parquet",
             "events_file": "events.parquet",
@@ -183,8 +351,32 @@ def write_package(
     event_count: int = DEFAULT_EVENT_COUNT,
     observables: list[str] | None = None,
     include_all_replicas: bool = False,
+    include_systematics: bool = True,
+    nominal_convention: str = DEFAULT_NOMINAL_CONVENTION,
+    normalization_mode: str = DEFAULT_NORMALIZATION_MODE,
+    weight_units: str | None = DEFAULT_WEIGHT_UNITS,
 ) -> Path:
-    """Create a minimal Parquet-backed publication package."""
+    """Create a minimal Parquet-backed publication package.
+
+    ``include_systematics`` packages every discovered NP systematic weight
+    column plus the paired (weights_dd, target_dd) columns as declared
+    weight families. ``include_all_replicas`` additionally packages the
+    full bootstrap/ensemble replica sets as families; by default only the
+    single first replica column is kept, preserving small demo packages.
+    """
+
+    if nominal_convention not in NOMINAL_CONVENTIONS:
+        allowed = ", ".join(NOMINAL_CONVENTIONS)
+        raise PackageWriteError(
+            f"Unknown nominal_convention {nominal_convention!r}; "
+            f"expected one of: {allowed}."
+        )
+    if normalization_mode not in NORMALIZATION_MODES:
+        allowed = ", ".join(NORMALIZATION_MODES)
+        raise PackageWriteError(
+            f"Unknown normalization_mode {normalization_mode!r}; "
+            f"expected one of: {allowed}."
+        )
 
     input_path = Path(input_path)
     if not input_path.exists():
@@ -202,17 +394,46 @@ def write_package(
     replica_columns = _find_replica_columns(source_columns) if include_all_replicas else []
     iteration_weights = _discover_iteration_weights(source_columns)
 
+    families: dict[str, dict[str, Any]] = {}
+    if include_systematics:
+        families.update(_discover_systematic_families(source_columns))
+    if include_all_replicas:
+        families.update(_discover_replica_families(source_columns))
+
     observable_names = observables or [PRIMARY_OBSERVABLE, EXTRA_OBSERVABLE]
+    derived_requested = [
+        name
+        for name in observable_names
+        if name not in df.columns and name in DERIVED_OBSERVABLES
+    ]
+    if derived_requested:
+        df = compute_derived_observables(df, derived_requested)
+
+    source_metadata = _load_source_metadata(metadata_source)
+    observable_entries = _filter_observables(source_metadata, observable_names)
+
     selected_columns = [
         *observable_names,
         BASE_WEIGHT_COLUMN,
         NOMINAL_WEIGHT_COLUMN,
     ]
+    for entry in observable_entries:
+        expression = entry.get("selection")
+        if not isinstance(expression, str):
+            continue
+        for column in selection_columns(expression):
+            if column not in df.columns:
+                raise PackageWriteError(
+                    f"Selection for observable {entry.get('name')!r} "
+                    f"references missing column {column!r}."
+                )
+            selected_columns.append(column)
     if EVENT_ID_COLUMN in df.columns:
         selected_columns.append(EVENT_ID_COLUMN)
     if replica_column is not None:
         selected_columns.append(replica_column)
     selected_columns.extend(replica_columns)
+    selected_columns.extend(_family_columns(families))
     for iteration in iteration_weights:
         for step in ("step1", "step2"):
             step_spec = iteration.get(step)
@@ -224,10 +445,9 @@ def write_package(
     package_df = df.loc[:, selected_columns]
     package_event_count = int(len(package_df))
     nominal_sumw = float(package_df[NOMINAL_WEIGHT_COLUMN].to_numpy(dtype=float).sum())
-    source_metadata = _load_source_metadata(metadata_source)
     package_metadata = _build_package_metadata(
         source_metadata=source_metadata,
-        observable_names=observable_names,
+        observable_entries=observable_entries,
         selected_columns=selected_columns,
         replica_column=replica_column,
         iteration_weights=iteration_weights,
@@ -236,6 +456,10 @@ def write_package(
         input_path=input_path,
         has_event_id=EVENT_ID_COLUMN in package_df.columns,
         replica_columns=replica_columns,
+        nominal_convention=nominal_convention,
+        families=families,
+        normalization_mode=normalization_mode,
+        weight_units=weight_units,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)

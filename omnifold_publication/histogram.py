@@ -100,6 +100,9 @@ class HistogramResult:
     stat_uncertainty: np.ndarray
     sys_uncertainty: np.ndarray | None = None
     replica_uncertainty: np.ndarray | None = None
+    # combined uncertainty, for sources (e.g. HEPData tables) that publish
+    # a single total error rather than a component breakdown
+    total_uncertainty: np.ndarray | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible representation, omitting absent fields."""
@@ -114,6 +117,8 @@ class HistogramResult:
             result["sys_uncertainty"] = self.sys_uncertainty.tolist()
         if self.replica_uncertainty is not None:
             result["replica_uncertainty"] = self.replica_uncertainty.tolist()
+        if self.total_uncertainty is not None:
+            result["total_uncertainty"] = self.total_uncertainty.tolist()
         return result
 
 

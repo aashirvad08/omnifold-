@@ -19,12 +19,22 @@ class PhaseSpace(BaseModel):
     note: str | None = Field(default=None)
 
 
+class Binning(BaseModel):
+    """Official binning with its provenance, distinct from suggestions."""
+
+    official: list[int | float] | None = Field(default=None)
+    provenance: str | None = Field(default=None)
+
+
 class Observable(BaseModel):
     name: str = Field(...)
     description: str = Field(...)
     units: str = Field(...)
     suggested_bins: list[int | float] | None = Field(default=None)
     bins_note: str | None = Field(default=None)
+    binning: Binning | None = Field(default=None)
+    selection: str | None = Field(default=None)
+    derived_from: list[str] | None = Field(default=None)
 
 
 class WeightFamily(BaseModel):
@@ -34,9 +44,32 @@ class WeightFamily(BaseModel):
     combination: str = Field(...)
 
 
+class PackagedWeightFamily(BaseModel):
+    """A packaged family of weight columns with its combination recipe."""
+
+    type: str = Field(...)
+    combination: str = Field(...)
+    columns: list[str] = Field(default_factory=list)
+    reference_column: str | None = Field(default=None)
+
+
+class IterationStep(BaseModel):
+    column: str = Field(...)
+
+
+class IterationEntry(BaseModel):
+    iteration: int = Field(...)
+    step1: IterationStep | None = Field(default=None)
+    step2: IterationStep | None = Field(default=None)
+
+
 class Weights(BaseModel):
     nominal: str = Field(...)
     base_mc_weight: str = Field(...)
+    nominal_convention: str | None = Field(default=None)
+    replica: str | None = Field(default=None)
+    families: dict[str, PackagedWeightFamily] | None = Field(default=None)
+    iterations: list[IterationEntry] | None = Field(default=None)
     bootstrap_prefix: str | None = Field(default=None)
     ensemble_prefix: str | None = Field(default=None)
     data_bootstrap_prefix: str | None = Field(default=None)
@@ -57,6 +90,8 @@ class Normalization(BaseModel):
     nominal_weight_column: str | None = Field(default=None)
     expected_nominal_sumw: float | None = Field(default=None)
     tolerance: float | None = Field(default=None)
+    weight_units: str | None = Field(default=None)
+    sum_weights_equals: str | None = Field(default=None)
     note: str | None = Field(default=None)
 
 
@@ -83,6 +118,7 @@ class Dataset(BaseModel):
     experiment: str | None = Field(default=None)
     description: str | None = Field(default=None)
     schema_version: str | None = Field(default=None)
+    provenance_note: str | None = Field(default=None)
 
 
 class Generation(BaseModel):

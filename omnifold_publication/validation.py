@@ -49,6 +49,20 @@ def _weight_columns(metadata: dict[str, Any]) -> list[str]:
                 ):
                     columns.append(step_spec["column"])
 
+        families = weights.get("families", {})
+        if isinstance(families, dict):
+            for family in families.values():
+                if not isinstance(family, dict):
+                    continue
+                columns.extend(
+                    column
+                    for column in family.get("columns", [])
+                    if isinstance(column, str)
+                )
+                reference = family.get("reference_column")
+                if isinstance(reference, str):
+                    columns.append(reference)
+
     return list(dict.fromkeys(columns))
 
 

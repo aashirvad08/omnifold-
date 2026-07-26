@@ -5,6 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .analysis import OmniFoldAnalysis, load_analysis
+from .binning import equal_effective_events_bins, n_eff, validate_binning
+from .closure import chi2_test
+from .hepdata import HEPDataPackage, export_hepdata, load_hepdata_submission
+from .plotting import plot_closure_grid
+from .derived_observables import (
+    DERIVED_OBSERVABLES,
+    compute_derived_observables,
+)
 from .exceptions import (
     ManifestNotFoundError,
     OmniFoldPublicationError,
