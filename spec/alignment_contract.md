@@ -43,8 +43,7 @@ current standard permits row-order alignment without event identifiers.
 
 If an analysis provides an `event_id` column and declares column-based
 alignment, the metadata MUST name that column. Validators check that the column
-Validators MUST check that the column is present, non-null, and unique within the sample.
-Duplicate event IDs cause
+is present, non-null, and unique within the sample. Duplicate event IDs cause
 validation failure.
 
 If `event_id` is absent and row-order alignment is declared, validators MUST NOT
