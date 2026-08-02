@@ -1,0 +1,11 @@
+target-version = "py311"
+line-length = 88
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+# FastAPI dependency-injection idiom puts callables in argument defaults.
+ignore = ["B008"]
+
+[lint.per-file-ignores]
+# tests import through sys.path shims and reach into internals deliberately
+"tests/*" = ["E402"]

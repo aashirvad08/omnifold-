@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+
+# --- Tool caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS ---
+.DS_Store
+
+# --- Data (multi-GB inputs; fetched separately, never committed) ---
+data/*
+!data/.gitkeep
+
+# --- Generated packages ---
+# artifacts/ holds regenerable publication packages (events.parquet files run
+# to >1 GB). The small cross-publication deliverable is kept so the committed
+# result stays reviewable without the bulk.
+artifacts/*
+!artifacts/cross_publication/
+artifacts/cross_publication/*
+!artifacts/cross_publication/comparison.json
+!artifacts/cross_publication/multifold_vs_omnifold_pT_ll.png
+
+# --- Large data formats, wherever they land ---
+*.h5
+*.hdf5
+*.parquet
