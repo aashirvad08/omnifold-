@@ -25,15 +25,16 @@ htmlcov/
 data/*
 !data/.gitkeep
 
-# --- Generated packages ---
-# artifacts/ holds regenerable publication packages (events.parquet files run
-# to >1 GB). The small cross-publication deliverable is kept so the committed
-# result stays reviewable without the bulk.
-artifacts/*
-!artifacts/cross_publication/
-artifacts/cross_publication/*
-!artifacts/cross_publication/comparison.json
-!artifacts/cross_publication/multifold_vs_omnifold_pT_ll.png
+# --- Generated output (regenerable; never committed) ---
+artifacts/
+
+# --- TEMPORARY: repo is package-only for now ---
+# These directories still exist on disk and are untracked, not deleted.
+# Remove the entries below to bring them back under version control.
+backend/
+demo/
+scripts/
+closure_grid.png
 
 # --- Large data formats, wherever they land ---
 *.h5
