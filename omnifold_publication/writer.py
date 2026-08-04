@@ -82,6 +82,30 @@ def _compute_checksum(path: Path) -> str:
     return sha256.hexdigest()
 
 
+def _read_events(input_path: Path) -> pd.DataFrame:
+    """Load event rows from an HDF5 or Parquet source.
+
+    HDF5 is read exactly as before (key ``"df"``). Parquet is read with
+    only its scalar columns: variable-length / particle-level array columns
+    (e.g. ``truth_pT_particles``) are skipped, since binned-observable
+    publication never uses them and they dominate the file size. This keeps
+    the existing HDF5 path byte-for-byte unchanged.
+    """
+
+    if input_path.suffix.lower() == ".parquet":
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = pq.ParquetFile(input_path).schema_arrow
+        scalar = [
+            name
+            for name, dtype in zip(schema.names, schema.types, strict=True)
+            if not (pa.types.is_list(dtype) or pa.types.is_large_list(dtype))
+        ]
+        return pd.read_parquet(input_path, columns=scalar)
+    return pd.read_hdf(input_path, "df")
+
+
 def _load_source_metadata(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
         data = yaml.safe_load(stream) or {}
@@ -303,6 +327,8 @@ def _build_package_metadata(
     families: dict[str, dict[str, Any]] | None = None,
     normalization_mode: str = DEFAULT_NORMALIZATION_MODE,
     weight_units: str | None = DEFAULT_WEIGHT_UNITS,
+    method: str | None = None,
+    assumptions: list[str] | None = None,
 ) -> dict[str, Any]:
     weights: dict[str, Any] = {
         "nominal": NOMINAL_WEIGHT_COLUMN,
@@ -318,9 +344,15 @@ def _build_package_metadata(
     if iteration_weights:
         weights["iterations"] = iteration_weights
 
+    dataset = dict(source_metadata.get("dataset", {}))
+    if method is not None:
+        dataset["method"] = method
+    if assumptions:
+        dataset["assumptions"] = list(assumptions)
+
     metadata: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
-        "dataset": source_metadata.get("dataset", {}),
+        "dataset": dataset,
         "observables": observable_entries,
         "weights": weights,
         "systematics": _build_systematics(replica_column, families),
@@ -348,13 +380,16 @@ def write_package(
     input_path: str | Path = DEFAULT_INPUT_PATH,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     metadata_source: str | Path = DEFAULT_METADATA_SOURCE,
-    event_count: int = DEFAULT_EVENT_COUNT,
+    event_count: int | None = DEFAULT_EVENT_COUNT,
     observables: list[str] | None = None,
     include_all_replicas: bool = False,
     include_systematics: bool = True,
     nominal_convention: str = DEFAULT_NOMINAL_CONVENTION,
     normalization_mode: str = DEFAULT_NORMALIZATION_MODE,
     weight_units: str | None = DEFAULT_WEIGHT_UNITS,
+    column_rename: dict[str, str] | None = None,
+    method: str | None = None,
+    assumptions: list[str] | None = None,
 ) -> Path:
     """Create a minimal Parquet-backed publication package.
 
@@ -363,6 +398,20 @@ def write_package(
     weight families. ``include_all_replicas`` additionally packages the
     full bootstrap/ensemble replica sets as families; by default only the
     single first replica column is kept, preserving small demo packages.
+
+    The remaining parameters exist to publish an independently produced
+    result (e.g. an OmniFold parquet) through the same single path, and all
+    default to the pre-existing behaviour:
+
+    - ``input_path`` may be ``.parquet`` as well as ``.h5``.
+    - ``column_rename`` renames source columns before packaging, e.g.
+      ``{"truth_pT_ll": "pT_ll", "weights_prior": "weight_mc"}`` to align a
+      differently-named schema to the package conventions.
+    - ``method`` records the unfolding method ("MultiFold"/"OmniFold") and
+      ``assumptions`` records publication-time caveats; both travel in the
+      package metadata's ``dataset`` block.
+    - ``event_count=None`` publishes the whole sample and additionally records
+      the resulting luminosity assumption in ``assumptions`` automatically.
     """
 
     if nominal_convention not in NOMINAL_CONVENTIONS:
@@ -388,7 +437,9 @@ def write_package(
     output_dir = Path(output_dir)
     metadata_source = Path(metadata_source)
 
-    df = pd.read_hdf(input_path, "df").iloc[:event_count].copy()
+    df = _read_events(input_path).iloc[:event_count].copy()
+    if column_rename:
+        df = df.rename(columns=column_rename)
     source_columns = list(df.columns)
     replica_column = _find_replica_column(source_columns)
     replica_columns = _find_replica_columns(source_columns) if include_all_replicas else []
@@ -444,6 +495,19 @@ def write_package(
 
     package_df = df.loc[:, selected_columns]
     package_event_count = int(len(package_df))
+
+    # Publishing the whole sample means the weighted sum is the expected yield
+    # at the measurement luminosity. That is an assumption a downstream
+    # comparison depends on, so record it in the package rather than relying on
+    # the caller to have passed it.
+    if event_count is None:
+        full_sample_note = (
+            "all events used; weighted sum is the expected yield at the "
+            "measurement luminosity (no event-count subsetting)"
+        )
+        assumptions = list(assumptions or [])
+        if full_sample_note not in assumptions:
+            assumptions.append(full_sample_note)
     nominal_sumw = float(package_df[NOMINAL_WEIGHT_COLUMN].to_numpy(dtype=float).sum())
     package_metadata = _build_package_metadata(
         source_metadata=source_metadata,
@@ -460,6 +524,8 @@ def write_package(
         families=families,
         normalization_mode=normalization_mode,
         weight_units=weight_units,
+        method=method,
+        assumptions=assumptions,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
