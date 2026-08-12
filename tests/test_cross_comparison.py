@@ -221,6 +221,62 @@ def test_export_json_round_trips(tmp_path, multifold_pkg, omnifold_pkg):
     assert [s["method"] for s in loaded["sides"]] == ["MultiFold", "OmniFold"]
 
 
+def test_uncertainty_comparison_traces_directly_to_breakdown(
+    multifold_pkg, omnifold_pkg
+):
+    """Every number in the uncertainty-comparison view must come straight
+    from a fresh uncertainty_breakdown() call on each package, never a
+    recomputation from raw events."""
+
+    cmp = compare_publications(multifold_pkg, omnifold_pkg, "pT_ll", bins=BINS)
+    d = cmp.uncertainty_comparison_to_dict()
+    assert d["kind"] == "cross_publication_uncertainty_comparison"
+    assert d["provenance"]["correlation_model"] == "none"
+
+    a_direct = multifold_pkg.uncertainty_breakdown("pT_ll", bins=BINS)
+    a_side, b_side = d["sides"]
+    expected_total_pct = 100.0 * np.asarray(a_direct["total"]) / np.abs(
+        np.asarray(a_direct["nominal"])
+    )
+    np.testing.assert_allclose(a_side["total_relative_pct"], expected_total_pct)
+
+    # the type-grouped rollup reconstructs the same total in quadrature
+    for side in (a_side, b_side):
+        groups = np.stack(
+            [np.asarray(v) for v in side["group_relative_pct"].values()]
+        )
+        recon = np.sqrt((groups**2).sum(axis=0))
+        np.testing.assert_allclose(recon, side["total_relative_pct"], atol=1e-8)
+        assert set(side["component_group"].values()) <= {
+            "statistical", "systematic", "data_driven"
+        }
+
+
+def test_export_uncertainty_comparison_json_round_trips(
+    tmp_path, multifold_pkg, omnifold_pkg
+):
+    import json
+
+    cmp = compare_publications(multifold_pkg, omnifold_pkg, "pT_ll", bins=BINS)
+    out = tmp_path / "unc_cmp.json"
+    cmp.export_uncertainty_comparison_json(out)
+    loaded = json.loads(out.read_text())
+    assert loaded["kind"] == "cross_publication_uncertainty_comparison"
+    assert len(loaded["sides"]) == 2
+
+
+def test_plot_uncertainty_comparison_saves_figure(
+    tmp_path, multifold_pkg, omnifold_pkg
+):
+    import matplotlib.pyplot as plt
+
+    cmp = compare_publications(multifold_pkg, omnifold_pkg, "pT_ll", bins=BINS)
+    out = tmp_path / "unc_cmp.png"
+    fig = cmp.plot_uncertainty_comparison(out)
+    assert out.exists() and out.stat().st_size > 0
+    plt.close(fig)
+
+
 def test_real_multifold_vs_omnifold(tmp_path):
     """The real deliverable, gated on the actual data files."""
 
@@ -261,3 +317,12 @@ def test_real_multifold_vs_omnifold(tmp_path):
     # two independent unfoldings of the same measurement agree within ~10%
     ratio = np.asarray(d["ratio"]["values"])
     assert np.all(np.abs(ratio - 1.0) < 0.1)
+
+    # both publications are systematic-dominated in every bin, not
+    # statistics-dominated -- a real finding from this data, pinned here as
+    # a regression check rather than assumed
+    unc = cmp.uncertainty_comparison_to_dict()
+    for side in unc["sides"]:
+        stat = np.asarray(side["group_relative_pct"]["statistical"])
+        syst = np.asarray(side["group_relative_pct"]["systematic"])
+        assert np.all(syst > stat)

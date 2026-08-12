@@ -75,6 +75,32 @@ def _relative(total: np.ndarray, hist: np.ndarray) -> np.ndarray:
         return np.where(hist != 0.0, total / np.abs(hist), np.nan)
 
 
+# Coarse grouping for the per-component uncertainty comparison view, derived
+# from each package's own declared weight-family "type" — never inferred
+# from the component name string. "sample_stat" is the one component with no
+# declared family: it is the baseline sqrt(sum w^2) statistical term computed
+# directly in uncertainty.py, so it is treated as statistical by convention.
+_FAMILY_GROUP = {
+    "bootstrap": "statistical",
+    "ensemble": "statistical",
+    "systematic": "systematic",
+    "paired": "data_driven",
+}
+_GROUP_COLOR = {
+    "statistical": "#2c7fb8",
+    "systematic": "#d6604d",
+    "data_driven": "#7570b3",
+    "other": "#888888",
+}
+
+
+def _component_group(package: OmniFoldPackage, name: str) -> str:
+    if name == "sample_stat":
+        return "statistical"
+    declared = package.weight_family(name).get("type")
+    return _FAMILY_GROUP.get(declared, "other")
+
+
 class CrossPublicationComparison:
     """Side-by-side comparison of two published results with independent
     uncertainty bands and a between-results ratio."""
@@ -103,6 +129,8 @@ class CrossPublicationComparison:
 
         self.observable = observable
         self.correlation = correlation
+        self._package_a = package_a
+        self._package_b = package_b
         fallback_a, fallback_b = labels or ("A", "B")
 
         # shared bins: explicit, else side A's declared/official binning,
@@ -233,6 +261,181 @@ class CrossPublicationComparison:
         rax.legend(frameon=False, fontsize=8)
 
         fig.tight_layout()
+        if output_path is not None:
+            fig.savefig(output_path, dpi=160)
+        return fig
+
+    def uncertainty_comparison_to_dict(self) -> dict[str, Any]:
+        """Per-side relative-uncertainty numbers behind
+        :meth:`plot_uncertainty_comparison`: per-component and type-grouped
+        relative uncertainty (%), derived from each side's own
+        ``uncertainty_breakdown()`` output — no uncertainty is recomputed
+        here, only expressed as a percentage of that side's own histogram."""
+
+        sides_out = []
+        for side, package in (
+            (self._side_a, self._package_a),
+            (self._side_b, self._package_b),
+        ):
+            hist = np.asarray(side["hist"], dtype=float)
+            total = np.asarray(side["uncertainty"]["total"], dtype=float)
+            components = side["uncertainty"]["components"]
+
+            component_group: dict[str, str] = {}
+            components_relative_pct: dict[str, list[float]] = {}
+            group_sq: dict[str, np.ndarray] = {}
+            for name, values in components.items():
+                values_arr = np.asarray(values, dtype=float)
+                components_relative_pct[name] = (
+                    100.0 * _relative(values_arr, hist)
+                ).tolist()
+                group = _component_group(package, name)
+                component_group[name] = group
+                group_sq[group] = group_sq.get(
+                    group, np.zeros_like(values_arr)
+                ) + values_arr**2
+
+            group_relative_pct = {
+                group: (100.0 * _relative(np.sqrt(sq), hist)).tolist()
+                for group, sq in group_sq.items()
+            }
+
+            sides_out.append(
+                {
+                    "label": side["label"],
+                    "total_relative_pct": (100.0 * _relative(total, hist)).tolist(),
+                    "components_relative_pct": components_relative_pct,
+                    "component_group": component_group,
+                    "group_relative_pct": group_relative_pct,
+                }
+            )
+
+        return {
+            "kind": "cross_publication_uncertainty_comparison",
+            "observable": self.observable,
+            "bins": self.bins,
+            "sides": sides_out,
+            "provenance": {
+                "correlation_model": self.correlation,
+                "correlation_note": (
+                    "each side's uncertainty is computed independently from "
+                    "its own data; this view never implies a combined or "
+                    "correlated uncertainty between the two publications"
+                ),
+                "derivation_note": (
+                    "components_relative_pct[name] = 100 * "
+                    "components[name] / abs(nominal), both taken as-is from "
+                    "that side's uncertainty_breakdown(); group_relative_pct "
+                    "is the quadrature sum (sqrt of sum of squares) of the "
+                    "named components sharing a declared weight-family "
+                    "'type' (bootstrap/ensemble -> statistical, systematic "
+                    "-> systematic, paired -> data_driven; sample_stat is "
+                    "the undeclared baseline statistical term). No "
+                    "uncertainty value is recomputed from raw events."
+                ),
+            },
+        }
+
+    def export_uncertainty_comparison_json(self, output_path: str | Path) -> None:
+        with Path(output_path).open("w", encoding="utf-8") as stream:
+            json.dump(self.uncertainty_comparison_to_dict(), stream, indent=2)
+
+    def plot_uncertainty_comparison(self, output_path: str | Path | None = None) -> Any:
+        """Compare the two sides' *own* uncertainties directly: total
+        relative size per bin (top), and per-component composition per side
+        (bottom, small multiple colored by declared family type). Each
+        side's uncertainty is independent — this never implies a combined
+        band, consistent with ``correlation="none"``."""
+
+        import matplotlib.pyplot as plt
+
+        edges = np.asarray(self.bins, dtype=float)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        bar_width = np.diff(edges) * 0.35
+
+        sides = (
+            (self._side_a, self._package_a, "#1f77b4"),
+            (self._side_b, self._package_b, "#d6336c"),
+        )
+
+        fig = plt.figure(figsize=(11, 8.5), constrained_layout=True)
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.3], wspace=0.1)
+        ax_total = fig.add_subplot(gs[0, :])
+        ax_a = fig.add_subplot(gs[1, 0])
+        ax_b = fig.add_subplot(gs[1, 1], sharey=ax_a)
+
+        # --- top: total relative uncertainty, grouped bars ---
+        rel_totals = []
+        for (side, _, color), sign in zip(sides, (-1, 1)):
+            hist = np.asarray(side["hist"], dtype=float)
+            total = np.asarray(side["uncertainty"]["total"], dtype=float)
+            rel = 100.0 * _relative(total, hist)
+            rel_totals.append(rel)
+            ax_total.bar(
+                centers + sign * bar_width / 2, rel, width=bar_width,
+                color=color, label=side["label"],
+            )
+        ax_total.set_ylabel("total relative uncertainty [%]")
+        ax_total.set_xlabel(self.observable)
+        ax_total.set_title(
+            f"Uncertainty comparison — {self.observable}\n"
+            "each side computed independently; no cross-publication "
+            "correlation assumed (correlation=\"none\")",
+            fontsize=10,
+        )
+        ax_total.legend(frameon=False)
+        finite_totals = np.concatenate(
+            [rel[np.isfinite(rel) & (rel > 0)] for rel in rel_totals]
+        )
+        if finite_totals.size and finite_totals.max() / finite_totals.min() > 20.0:
+            ax_total.set_yscale("log")
+
+        # --- bottom: per-side component small multiple, colored by type ---
+        all_component_vals = []
+        seen_groups: set[str] = set()
+        for (side, package, _), ax in zip(sides, (ax_a, ax_b)):
+            hist = np.asarray(side["hist"], dtype=float)
+            total = np.asarray(side["uncertainty"]["total"], dtype=float)
+            components = side["uncertainty"]["components"]
+            for name, values in sorted(
+                components.items(), key=lambda kv: -np.sum(kv[1])
+            ):
+                group = _component_group(package, name)
+                rel = 100.0 * _relative(np.asarray(values, dtype=float), hist)
+                all_component_vals.append(rel)
+                ax.stairs(
+                    rel, edges, color=_GROUP_COLOR[group], linewidth=1.2,
+                    alpha=0.85, label=name,
+                )
+                seen_groups.add(group)
+            rel_total = 100.0 * _relative(total, hist)
+            all_component_vals.append(rel_total)
+            ax.stairs(rel_total, edges, color="black", linewidth=2.2, label="total")
+            ax.set_title(side["label"], fontsize=10)
+            ax.set_xlabel(self.observable)
+            ax.legend(fontsize=6, ncol=2, frameon=False, loc="lower right")
+        ax_a.set_ylabel("relative uncertainty [%]")
+        plt.setp(ax_b.get_yticklabels(), visible=False)
+
+        finite_components = np.concatenate(
+            [v[np.isfinite(v) & (v > 0)] for v in all_component_vals]
+        )
+        if finite_components.size and (
+            finite_components.max() / finite_components.min() > 20.0
+        ):
+            ax_a.set_yscale("log")
+
+        group_legend = [
+            plt.Line2D([0], [0], color=_GROUP_COLOR[g], lw=2, label=g.replace("_", " "))
+            for g in ("statistical", "systematic", "data_driven")
+            if g in seen_groups
+        ]
+        if group_legend:
+            fig.legend(
+                handles=group_legend, loc="outside lower center",
+                ncol=len(group_legend), frameon=False, fontsize=8,
+            )
+
         if output_path is not None:
             fig.savefig(output_path, dpi=160)
         return fig
