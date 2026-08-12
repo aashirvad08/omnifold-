@@ -97,7 +97,13 @@ _GROUP_COLOR = {
 def _component_group(package: OmniFoldPackage, name: str) -> str:
     if name == "sample_stat":
         return "statistical"
-    declared = package.weight_family(name).get("type")
+    try:
+        declared = package.weight_family(name).get("type")
+    except PackageReadError:
+        # A breakdown component with no declared family: group it as "other"
+        # rather than failing the whole plot. Grouping is presentation only,
+        # so an unrecognised component must never hide the numbers.
+        return "other"
     return _FAMILY_GROUP.get(declared, "other")
 
 
