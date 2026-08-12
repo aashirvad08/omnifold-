@@ -348,27 +348,43 @@ class CrossPublicationComparison:
 
     def plot_uncertainty_comparison(self, output_path: str | Path | None = None) -> Any:
         """Compare the two sides' *own* uncertainties directly: total
-        relative size per bin (top), and per-component composition per side
-        (bottom, small multiple colored by declared family type). Each
-        side's uncertainty is independent — this never implies a combined
-        band, consistent with ``correlation="none"``."""
+        relative size per bin (top), and per-component composition with both
+        publications overlaid on one canvas (bottom), coloured by declared
+        family type and styled by publication. Both panels use equal-width
+        bin slots so every bin carries the same visual weight. Each side's
+        uncertainty is independent — this never implies a combined band,
+        consistent with ``correlation="none"``."""
 
         import matplotlib.pyplot as plt
 
         edges = np.asarray(self.bins, dtype=float)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        bar_width = np.diff(edges) * 0.35
+        # The grouped bars sit on evenly spaced categorical slots, one per
+        # bin, rather than at physical bin centres. Physical placement scales
+        # bar width with bin width, so a wide trailing bin renders as a huge
+        # offset pair that misstates the binning and squeezes narrow bins to
+        # invisibility. The bin range is carried by the tick label instead.
+        slots = np.arange(len(edges) - 1, dtype=float)
+        bar_width = 0.38
+        slot_labels = [
+            f"{edges[i]:g}–{edges[i + 1]:g}" for i in range(len(edges) - 1)
+        ]
 
         sides = (
             (self._side_a, self._package_a, "#1f77b4"),
             (self._side_b, self._package_b, "#d6336c"),
         )
 
+        # Uniform slot edges: one equal-width slot per bin. Both sides are
+        # drawn on these same edges so every bin carries equal visual weight
+        # regardless of its physical width (200-230 GeV is 30 GeV wide,
+        # 600-1000 GeV is 400) - otherwise the wide tail bin dominates the
+        # canvas and the narrow bins are unreadable.
+        slot_edges = np.arange(len(edges), dtype=float)
+
         fig = plt.figure(figsize=(11, 8.5), constrained_layout=True)
-        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.3], wspace=0.1)
-        ax_total = fig.add_subplot(gs[0, :])
-        ax_a = fig.add_subplot(gs[1, 0])
-        ax_b = fig.add_subplot(gs[1, 1], sharey=ax_a)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1.3])
+        ax_total = fig.add_subplot(gs[0])
+        ax_comp = fig.add_subplot(gs[1])
 
         # --- top: total relative uncertainty, grouped bars ---
         rel_totals = []
@@ -378,11 +394,16 @@ class CrossPublicationComparison:
             rel = 100.0 * _relative(total, hist)
             rel_totals.append(rel)
             ax_total.bar(
-                centers + sign * bar_width / 2, rel, width=bar_width,
+                slots + sign * bar_width / 2, rel, width=bar_width,
                 color=color, label=side["label"],
             )
         ax_total.set_ylabel("total relative uncertainty [%]")
-        ax_total.set_xlabel(self.observable)
+        ax_total.set_xticks(slots)
+        ax_total.set_xticklabels(slot_labels)
+        units = self._package_a.observable_units(self.observable)
+        ax_total.set_xlabel(
+            f"{self.observable} [{units}]" if units else self.observable
+        )
         ax_total.set_title(
             f"Uncertainty comparison — {self.observable}\n"
             "each side computed independently; no cross-publication "
@@ -396,32 +417,48 @@ class CrossPublicationComparison:
         if finite_totals.size and finite_totals.max() / finite_totals.min() > 20.0:
             ax_total.set_yscale("log")
 
-        # --- bottom: per-side component small multiple, colored by type ---
+        # --- bottom: both sides' components overlaid on one canvas ---
+        # Two encodings are needed at once, so they are kept orthogonal:
+        # colour carries the declared family group, line style carries the
+        # publication. Component names are deliberately not in the legend -
+        # every systematic shares one colour, so naming them individually
+        # would imply a distinction the colours do not actually make.
         all_component_vals = []
         seen_groups: set[str] = set()
-        for (side, package, _), ax in zip(sides, (ax_a, ax_b)):
+        side_styles = ("-", "--")
+        for (side, package, _), style in zip(sides, side_styles):
             hist = np.asarray(side["hist"], dtype=float)
             total = np.asarray(side["uncertainty"]["total"], dtype=float)
-            components = side["uncertainty"]["components"]
             for name, values in sorted(
-                components.items(), key=lambda kv: -np.sum(kv[1])
+                side["uncertainty"]["components"].items(),
+                key=lambda kv: -np.sum(kv[1]),
             ):
                 group = _component_group(package, name)
                 rel = 100.0 * _relative(np.asarray(values, dtype=float), hist)
                 all_component_vals.append(rel)
-                ax.stairs(
-                    rel, edges, color=_GROUP_COLOR[group], linewidth=1.2,
-                    alpha=0.85, label=name,
+                ax_comp.stairs(
+                    rel, slot_edges, color=_GROUP_COLOR[group], linewidth=1.1,
+                    linestyle=style, alpha=0.75, baseline=None,
                 )
                 seen_groups.add(group)
             rel_total = 100.0 * _relative(total, hist)
             all_component_vals.append(rel_total)
-            ax.stairs(rel_total, edges, color="black", linewidth=2.2, label="total")
-            ax.set_title(side["label"], fontsize=10)
-            ax.set_xlabel(self.observable)
-            ax.legend(fontsize=6, ncol=2, frameon=False, loc="lower right")
-        ax_a.set_ylabel("relative uncertainty [%]")
-        plt.setp(ax_b.get_yticklabels(), visible=False)
+            ax_comp.stairs(
+                rel_total, slot_edges, color="black", linewidth=2.2,
+                linestyle=style, baseline=None,
+            )
+
+        ax_comp.set_ylabel("relative uncertainty [%]")
+        ax_comp.set_xticks(0.5 * (slot_edges[:-1] + slot_edges[1:]))
+        ax_comp.set_xticklabels(slot_labels)
+        ax_comp.set_xlabel(
+            f"{self.observable} [{units}]" if units else self.observable
+        )
+        ax_comp.set_title(
+            "per-component composition, both publications overlaid "
+            "(equal-width bins)",
+            fontsize=9,
+        )
 
         finite_components = np.concatenate(
             [v[np.isfinite(v) & (v > 0)] for v in all_component_vals]
@@ -429,18 +466,31 @@ class CrossPublicationComparison:
         if finite_components.size and (
             finite_components.max() / finite_components.min() > 20.0
         ):
-            ax_a.set_yscale("log")
+            ax_comp.set_yscale("log")
 
-        group_legend = [
+        group_handles = [
             plt.Line2D([0], [0], color=_GROUP_COLOR[g], lw=2, label=g.replace("_", " "))
-            for g in ("statistical", "systematic", "data_driven")
+            for g in ("statistical", "systematic", "data_driven", "other")
             if g in seen_groups
         ]
-        if group_legend:
-            fig.legend(
-                handles=group_legend, loc="outside lower center",
-                ncol=len(group_legend), frameon=False, fontsize=8,
-            )
+        group_handles.append(
+            plt.Line2D([0], [0], color="black", lw=2.2, label="total")
+        )
+        side_handles = [
+            plt.Line2D([0], [0], color="#444444", lw=1.6, linestyle=style,
+                       label=side["label"])
+            for (side, _, _), style in zip(sides, side_styles)
+        ]
+        legend_groups = ax_comp.legend(
+            handles=group_handles, title="uncertainty type", fontsize=7,
+            title_fontsize=7, frameon=False, ncol=len(group_handles),
+            loc="upper left",
+        )
+        ax_comp.add_artist(legend_groups)
+        ax_comp.legend(
+            handles=side_handles, title="publication", fontsize=7,
+            title_fontsize=7, frameon=False, loc="lower right",
+        )
 
         if output_path is not None:
             fig.savefig(output_path, dpi=160)
