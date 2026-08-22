@@ -119,6 +119,12 @@ class Dataset(BaseModel):
     description: str | None = Field(default=None)
     schema_version: str | None = Field(default=None)
     provenance_note: str | None = Field(default=None)
+    # Unfolding method that produced this result (e.g. "MultiFold",
+    # "OmniFold"); lets a cross-publication comparison label each side.
+    method: str | None = Field(default=None)
+    # Free-text assumptions recorded at publication time (e.g. "all events
+    # used", undocumented columns) so they travel with the package.
+    assumptions: list[str] | None = Field(default=None)
 
 
 class Generation(BaseModel):

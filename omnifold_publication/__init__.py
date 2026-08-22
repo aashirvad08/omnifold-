@@ -40,6 +40,10 @@ from .validation import (
     validate_normalization,
     validate_package,
 )
+from .cross_comparison import (
+    CrossPublicationComparison,
+    compare_publications,
+)
 from .writer import write_package
 
 if TYPE_CHECKING:
@@ -48,6 +52,8 @@ if TYPE_CHECKING:
 __all__ = [
     "OmniFoldAnalysis",
     "OmniFoldPackage",
+    "CrossPublicationComparison",
+    "compare_publications",
     "HistogramComparison",
     "HistogramResult",
     "ManifestNotFoundError",
